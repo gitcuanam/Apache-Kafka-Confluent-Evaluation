@@ -1,35 +1,27 @@
 package io.confluent.examples.producer;
 
+
 import java.io.FileReader;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Iterator;
-import java.util.List;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
-import java.io.FileReader;
-import org.json.simple.JSONArray;
+
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.Producer;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
-import org.json.simple.parser.ParseException;
-import kafka.admin.AdminUtils;
-import kafka.utils.ZKStringSerializer$;
-import kafka.admin.RackAwareMode;
-import kafka.utils.ZkUtils;
-import org.I0Itec.zkclient.ZkClient;
-import org.I0Itec.zkclient.ZkConnection;
-import io.confluent.examples.producer.ZookeeperUtil;
-import io.confluent.examples.producer.ProducerThread;
-import java.util.Map;
-import java.util.HashMap;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.CreateTopicsResult;
+import org.apache.kafka.clients.admin.NewTopic;
 
 public class ProducerGroup {
-
-    private int numThreads;
-    private int noOfContinousMessages;
     private ExecutorService executor;
     private static int DEFAULT_NO_THREADS = 10;
     private static int DEFAULT_SLEEP_TIME = 5000;
@@ -38,16 +30,32 @@ public class ProducerGroup {
     public static String BootStrapServer = "http://localhost:29092";
     public static long totalTimeProducing;
     static Object lock = new Object();
-    public String filePath = "/siva/test.json";
+    public String filePath = "/home/nam/work/Apache-Kafka-Confluent-Evaluation/kafka-clients/producer/src/main/resources/test.json";
     private String[] topicList = null;
 
     ProducerGroup(int noOfThreads, int noOfMessages, String[] topicList) {
-        numThreads = noOfThreads;
-        noOfContinousMessages = noOfMessages;
         this.topicList = topicList;
         ArrayList<String> topics = new ArrayList<String>(Arrays.asList(topicList));
-        ZookeeperUtil.createTopics(topics, noOfPartition, replicationFactor);
-
+        // https://stackoverflow.com/questions/65566929/cant-import-zkstringserializer
+        // ZookeeperUtil.createTopics(topics, noOfPartition, replicationFactor);
+        try (AdminClient client = AdminClient.create(this.producerConfig())) {
+            boolean topicExists = client.listTopics().names().get().stream().anyMatch(topicName -> topicName.equalsIgnoreCase("test-topic"));
+            if (topicExists) {
+                return;
+            }
+            CreateTopicsResult result = client.createTopics(Arrays.asList(
+                    new NewTopic("test-topic", 1, (short) 1)
+                    // new NewTopic("global-id-topic", 1, (short) 1),
+                    // new NewTopic("snapshot-topic", 1, (short) 1)
+            ));
+            result.all().get();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+            throw new IllegalStateException(e);
+        } catch (ExecutionException e) {
+            e.printStackTrace();
+            throw new IllegalStateException(e);
+        }
     }
 
     private Properties producerConfig() {
@@ -61,20 +69,50 @@ public class ProducerGroup {
     }
 
     public void run(int numThreads) {
+        // executor quản lý thread
         executor = Executors.newFixedThreadPool(numThreads);
-        int index;
-        int count = 0;
         int keyNo = 0;
+
+        // prepare data
+        String toReturn = null;
+        JSONParser parser = new JSONParser();
+        JSONObject jsonObject = null;
+        try {
+            Object obj = parser.parse(new FileReader(filePath));
+            jsonObject = (JSONObject) obj;
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        // tạo 5 thread
+        // mỗi thread đại diện 1 topic
         for (int i = 0; i < numThreads; i++) {
-            index = i % DEFAULT_NO_THREADS;
             keyNo = i % 5; // 5 can be replaced with number of topics.
-            if (index == 0) {
-                count++;
-            }
-            executor.submit(new ProducerThread(topicList[count - 1], String.valueOf(keyNo),
-                    retrieveData(topicList[count - 1],
-                            filePath),
-                    noOfContinousMessages, producerConfig()));
+            executor.submit(new Thread() {
+                public void run() {
+                    // keyNo = i % 5;
+                    int min = 1;
+                    int max = 5;
+                    int keyNo = ThreadLocalRandom.current().nextInt(min, max + 1);
+                    Producer<String, String> producer = new KafkaProducer<String, String>(producerConfig());
+                    try {
+
+                        Long startThreadTime = System.currentTimeMillis();
+                        long produceThreadTime = System.currentTimeMillis();
+
+                        ProducerRecord<String, String> data = new ProducerRecord<String, String>(
+                            "test-topic", String.valueOf(keyNo), "{}");
+                    producer.send(data);
+
+                        long elapsedTime = produceThreadTime - startThreadTime;
+                        ProducerGroup.totalTimeProducing += elapsedTime;
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    } finally {
+                        producer.flush();
+                    }
+                }
+            });
         }
 
     }
@@ -130,10 +168,6 @@ public class ProducerGroup {
     }
 
     public static void main(String[] args) {
-        // int a[] = {1, 2, 3};
-        // System.out.println(a.getClass().getName().toString());
-        System.out.println("args[0]");
-        System.out.println(args.length);
         String topics = args[0]; // List of topics to create seperated by Comma
         String[] topicList = topics.split(",");
         int noOfthreads = DEFAULT_NO_THREADS * topicList.length; // Number of Publishers
@@ -142,21 +176,24 @@ public class ProducerGroup {
         ProducerGroup pg = new ProducerGroup(noOfthreads, noOfMessages, topicList);
         Long startTime = System.currentTimeMillis();
         // Spawning threads
+        // bật thread
         pg.run(noOfthreads);
 
-        for (int i = 0; i < topicList.length; i++) {
-            long noProcessed = 0;
-            while (noProcessed < noOfMessages) {
-                synchronized (lock) {
-                    noProcessed = ProducerThread.getTopicCount(topicList[i]);
-                }
-                try {
-                    Thread.sleep(DEFAULT_SLEEP_TIME);
-                } catch (InterruptedException ie) {
-                    ie.printStackTrace();
-                }
-            }
-        }
+        // từng thread cứ mỗi 5 giây lại kiểm tra lại số message đã gửi đi
+        // for (int i = 0; i < topicList.length; i++) {
+        //     long noProcessed = 0;
+        //     while (noProcessed < noOfMessages) {
+        //         synchronized (lock) {
+        //             noProcessed = ProducerThread.getTopicCount(topicList[i]);
+        //         }
+        //         try {
+        //             Thread.sleep(DEFAULT_SLEEP_TIME);
+        //         } catch (InterruptedException ie) {
+        //             ie.printStackTrace();
+        //         }
+        //     }
+        // }
+
 
         pg.shutDown();
         Long endTime = System.currentTimeMillis();
