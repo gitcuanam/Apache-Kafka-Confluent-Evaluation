@@ -27,3 +27,5 @@ Producer -- Around 120k - 140K messages per second. When sending 2 million messa
 Consumer -- 1.2 Million - 2 Million messages per second.
 
 I was able to see similar throughput in a Multinode cluster in a VM setup.
+
+TODO: add json file to classpath
